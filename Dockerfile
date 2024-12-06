@@ -19,6 +19,17 @@ USER myuser
 
 # Set environment variables
 ENV PORT=8080
+ENV PYTHONUNBUFFERED=1
+ENV QUART_APP=app:app
+ENV QUART_ENV=production
 
-# Command to run the application using hypercorn
-CMD exec hypercorn app:app --bind 0.0.0.0:$PORT --workers 1
+# Command to run the application using hypercorn with increased timeout
+CMD exec hypercorn app:app \
+    --bind 0.0.0.0:$PORT \
+    --workers 1 \
+    --graceful-timeout 180 \
+    --worker-class asyncio \
+    --access-logfile - \
+    --error-logfile - \
+    --log-level info \
+    --timeout 300
