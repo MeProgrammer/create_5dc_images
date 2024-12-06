@@ -4,6 +4,9 @@ FROM python:3.9-slim
 # Set working directory in container
 WORKDIR /app
 
+# Install curl for health checks
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
 # Copy requirements file
 COPY requirements.txt .
 
@@ -22,14 +25,22 @@ ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
 ENV QUART_APP=app:app
 ENV QUART_ENV=production
+ENV HYPERCORN_WORKERS=1
+ENV HYPERCORN_ACCESS_LOG='-'
+ENV HYPERCORN_ERROR_LOG='-'
+ENV HYPERCORN_BIND="0.0.0.0:${PORT}"
 
-# Command to run the application using hypercorn with increased timeout
-CMD exec hypercorn app:app \
-    --bind 0.0.0.0:$PORT \
-    --workers 1 \
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/_ah/health || exit 1
+
+# Command to run the application
+CMD hypercorn app:app \
+    --bind ${HYPERCORN_BIND} \
+    --workers ${HYPERCORN_WORKERS} \
+    --access-logfile ${HYPERCORN_ACCESS_LOG} \
+    --error-logfile ${HYPERCORN_ERROR_LOG} \
     --graceful-timeout 180 \
     --worker-class asyncio \
-    --access-logfile - \
-    --error-logfile - \
-    --log-level info \
-    --timeout 300
+    --keep-alive 120 \
+    --log-level info
