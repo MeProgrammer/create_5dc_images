@@ -20,5 +20,5 @@ USER myuser
 # Set environment variables
 ENV PORT=8080
 
-# Command to run the application using gunicorn with async worker
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --worker-class aiohttp.GunicornWebWorker --timeout 0 app:app 
+# Command to run the application using hypercorn
+CMD exec hypercorn app:app --bind 0.0.0.0:$PORT --workers 1
