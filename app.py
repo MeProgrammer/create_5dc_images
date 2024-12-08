@@ -6,8 +6,16 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 from functools import partial
 from asgiref.wsgi import WsgiToAsgi
+import logging
 
 load_dotenv()
+
+# Set up logging configuration at the start of your file
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 asgi_app = WsgiToAsgi(app)  # Convert WSGI app to ASGI
@@ -46,6 +54,8 @@ async def generate_midjourney_prompt(anthropic_client, slide_data, template_data
     max_attempts = 3
     base_wait_time = 7  # seconds
     
+    logger.info(f"Generating prompt for slide: {slide_data.get('slide')} with template: {template_data}")
+    
     for attempt in range(max_attempts):
         try:
             prompt = create_anthropic_prompt(slide_data, template_data)
@@ -55,30 +65,27 @@ async def generate_midjourney_prompt(anthropic_client, slide_data, template_data
                 model="claude-3-haiku-20240229",
                 max_tokens=8000,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": assistant_prompt
-                    },
-                    {
-                        "role": "user", 
-                        "content": prompt
-                    }
+                    {"role": "system", "content": assistant_prompt},
+                    {"role": "user", "content": prompt}
                 ]
             )
+            logger.info(f"Received response from Anthropic: {message.content[0].text[:100]}...")
             return message.content[0].text
             
         except Exception as e:
-            if str(e).startswith('5'):  # Check if it's a 5xx error
-                if attempt < max_attempts - 1:  # Don't wait after the last attempt
-                    wait_time = base_wait_time * (2 ** attempt)  # Exponential backoff
-                    print(f"Attempt {attempt + 1} failed with 5xx error. Retrying in {wait_time} seconds...")
+            logger.error(f"Attempt {attempt + 1} failed: {str(e)}", exc_info=True)
+            if str(e).startswith('5'):
+                if attempt < max_attempts - 1:
+                    wait_time = base_wait_time * (2 ** attempt)
+                    logger.warning(f"5xx error, retrying in {wait_time} seconds...")
                     await asyncio.sleep(wait_time)
                     continue
-            print(f"Error generating prompt: {str(e)}")
             return None
 
 async def fetch_completed_tasks(session, task_ids, apiframe_key):
     """Fetch status of multiple tasks using fetch-many endpoint"""
+    logger.info(f"Fetching status for {len(task_ids)} tasks")
+    
     headers = {
         "Authorization": apiframe_key,
         "Content-Type": "application/json"
@@ -95,19 +102,27 @@ async def fetch_completed_tasks(session, task_ids, apiframe_key):
             headers=headers
         ) as response:
             results = await response.json()
+            logger.info(f"Received results for {len(results)} tasks")
             return results
     except Exception as e:
-        print(f"Error fetching tasks: {str(e)}")
+        logger.error(f"Error fetching tasks: {str(e)}", exc_info=True)
         return {}
 
 async def process_slides_batch(session, slides, anthropic_client, apiframe_key, webhook_url, template_data):
     """Process a batch of slides concurrently"""
+    logger.info(f"Processing batch of {len(slides)} slides")
+    
     # Generate prompts first
     prompts = []
     for slide in slides:
+        logger.info(f"Generating prompt for slide: {slide.get('slide')}")
         prompt = await generate_midjourney_prompt(anthropic_client, slide, template_data)
         if prompt:
             prompts.append((slide, prompt))
+        else:
+            logger.error(f"Failed to generate prompt for slide: {slide.get('slide')}")
+    
+    logger.info(f"Successfully generated {len(prompts)} prompts")
     
     # Submit all imagine requests
     imagine_tasks = []
@@ -124,19 +139,21 @@ async def process_slides_batch(session, slides, anthropic_client, apiframe_key, 
         }
         
         try:
+            logger.info(f"Submitting imagine request with prompt: {prompt[:100]}...")
             async with session.post(
                 "https://api.apiframe.pro/imagine",
                 json=payload,
                 headers=headers
             ) as response:
                 result = await response.json()
+                logger.info(f"Received task ID: {result.get('task_id')}")
                 imagine_tasks.append({
                     'task_id': result.get('task_id'),
                     'prompt': prompt,
                     'slide': _
                 })
         except Exception as e:
-            print(f"Error submitting imagine request: {str(e)}")
+            logger.error(f"Error submitting imagine request: {str(e)}", exc_info=True)
     
     # Poll for completion with fetch-many
     max_wait_time = 120  # Maximum wait time in seconds
@@ -219,18 +236,25 @@ async def send_webhook_response(webhook_url, data):
 @app.route('/', methods=['POST'])
 async def process_slides():
     try:
+        logger.info("Received new request")
         data = request.get_json()
+        logger.info(f"Processing request with {len(data.get('slides', []))} slides")
+        
         required_fields = [
             'slides', 'dest_webhook', 'apiframe_key', 'anthropic_key',
             'NameTitleofChallenge', 'VisualDescriptionofAvatar', 'IdealAvatar'
         ]
         
-        if not all(field in data for field in required_fields):
+        # Validate required fields
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
+            logger.error(f"Missing required fields: {missing_fields}")
             return jsonify({
-                'error': f'Missing required fields. Expected: {", ".join(required_fields)}'
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
             }), 400
 
         if not isinstance(data['slides'], list):
+            logger.error("Invalid slides format - expected array")
             return jsonify({'error': 'Slides must be an array'}), 400
 
         # Extract template data
@@ -239,6 +263,7 @@ async def process_slides():
             'VisualDescriptionofAvatar': data['VisualDescriptionofAvatar'],
             'IdealAvatar': data['IdealAvatar']
         }
+        logger.info(f"Template data: {template_data}")
 
         results = await process_all_slides(
             data['slides'],
@@ -248,8 +273,11 @@ async def process_slides():
             template_data
         )
         
+        logger.info(f"Processing completed with {len(results)} results")
+        
         # Send results to destination webhook
-        await send_webhook_response(data['dest_webhook'], results)
+        webhook_response = await send_webhook_response(data['dest_webhook'], results)
+        logger.info(f"Webhook response: {webhook_response}")
         
         # Return immediate response
         return jsonify({
@@ -259,6 +287,7 @@ async def process_slides():
         })
 
     except Exception as e:
+        logger.error(f"Error processing request: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 if __name__ == "__main__":
