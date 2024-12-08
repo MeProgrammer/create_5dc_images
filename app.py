@@ -64,9 +64,9 @@ async def generate_midjourney_prompt(anthropic_client, slide_data, template_data
             message = anthropic_client.messages.create(
                 model="claude-3-haiku-20240229",
                 max_tokens=8000,
+                system=assistant_prompt,  # Changed from messages array to system parameter
                 messages=[
-                    {"role": "system", "content": assistant_prompt},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt}  # Only include user message
                 ]
             )
             logger.info(f"Received response from Anthropic: {message.content[0].text[:100]}...")
